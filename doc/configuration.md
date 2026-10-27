@@ -99,7 +99,7 @@ Example outcomes:
 
 With `ai_usage_metrics_enabled`, the plugin sends usage and cost metrics for every request that Kong's
 AI Proxy plugin (`ai-proxy`) sends to a model provider. The metrics follow the
-[OpenTelemetry GenAI metrics semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/)
+[OpenTelemetry GenAI metrics semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-token-metrics.md)
 and are the same series that Datadog's LiteLLM integration sends, so dashboards and monitors work across
 both gateways. They are sent to the Datadog Agent over DogStatsD (`agent_host`, `dogstatsd_port`).
 Kong Gateway `v3.9` or newer is required.
