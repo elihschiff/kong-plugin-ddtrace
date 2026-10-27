@@ -29,6 +29,13 @@ Configuration can be set either through the plugin configuration field or enviro
 | `resource_name_rule` | | Replace matching resources to lower the cardinality on resource names | `v0.0.1` | `array[rule] with rule = {match=str, replacement=str}]` | `nil` |
 | `header_tags` |  | Set HTTP Headers as root tags | `v0.2.0` | `array[header_tag] with header_tag = {header=str, tag=str}]` | `nil` |
 | `startup_log` | `DD_TRACE_STARTUP_LOGS` | Log the tracer configuration once the tracer is fully initialized and every time there's a config update | `v0.2.3` | `boolean` | `true` |
+| `ai_usage_metrics_enabled` | | Send LLM usage and cost metrics for requests handled by Kong's AI Proxy plugin. See [LLM Usage and Cost Metrics](#llm-usage-and-cost-metrics) | unreleased | `boolean` | `false` |
+| `dogstatsd_port` | `DD_DOGSTATSD_PORT` | DogStatsD port of the Datadog Agent, on `agent_host`, that LLM usage metrics are sent to | unreleased | `number` | `8125` |
+| `ai_usage_metrics_flush_interval` | | Seconds between two sends of LLM usage metrics | unreleased | `number` | `10` |
+| `ai_usage_metrics_tags` | | Optional tags to add to LLM usage metrics: `provider_account`, `project`, `route`, `destination`, `user`, `service` | unreleased | `array[str]` | `{}` |
+| `ai_usage_metrics_api_key_id` | | Id of the provider API key the route uses, as shown in the provider's console, sent as `trajectory.request.api_key_id` | unreleased | `string` | `nil` |
+| `ai_usage_metrics_provider_account_id` | | Provider account (organization) the route is billed to, sent as `trajectory.request.provider_account_id` | unreleased | `string` | `nil` |
+| `ai_usage_metrics_project_id` | | Provider project the route is billed to, sent as `trajectory.request.project_id` | unreleased | `string` | `nil` |
 
 ## Sampling Controls
 
@@ -87,6 +94,71 @@ Example outcomes:
 > When configuring a Kong plugin using `curl`, the `--data` values should be wrapped in single-quotes to avoid expansion of special characters by the shell.
 >
 > Additional details about regular expressions can be found in OpenResty documentation for [ngx.re.match](https://github.com/openresty/lua-nginx-module#ngxrematch) and [ngx.re.sub](https://github.com/openresty/lua-nginx-module#ngxresub) which are used to apply the resource name rules.
+
+## LLM Usage and Cost Metrics
+
+With `ai_usage_metrics_enabled`, the plugin sends usage and cost metrics for every request that Kong's
+AI Proxy plugin (`ai-proxy`) sends to a model provider. The metrics follow the
+[OpenTelemetry GenAI metrics semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/)
+and are the same series that Datadog's LiteLLM integration sends, so dashboards and monitors work across
+both gateways. They are sent to the Datadog Agent over DogStatsD (`agent_host`, `dogstatsd_port`).
+Kong Gateway `v3.9` or newer is required.
+
+Per request to a model provider:
+
+| Metric | Type | Description |
+| ------ | ---- | ----------- |
+| `gen_ai.client.inference.duration` | distribution | Duration of the provider request, in seconds (`gen_ai.client.operation.duration` for embeddings), with `error.type` when it failed |
+| `gen_ai.client.inference.usage.input_tokens` | count | Input tokens, cached input included |
+| `gen_ai.client.inference.usage.output_tokens` | count | Output tokens, reasoning included |
+| `gen_ai.client.inference.usage.cache_read.input_tokens` | count | Input tokens read from the provider's prompt cache, when the provider reports them |
+| `gen_ai.client.inference.usage.cache_write.input_tokens` | count | Input tokens written to the provider's prompt cache, by `trajectory.cache.lifetime`, when the provider reports them |
+| `trajectory.gen_ai.client.inference.usage.cost` | count | Estimated cost in USD, at the model's configured `input_cost` and `output_cost` |
+
+Per client request:
+
+| Metric | Type | Description |
+| ------ | ---- | ----------- |
+| `trajectory.gen_ai.gateway.request.estimated_cost` | count | Estimated cost of the request in USD; `0` for a request that failed |
+
+Every distribution also sends `<name>.sum` and `<name>.count` counts.
+
+Tags: `gen_ai.operation.name` (`chat`, `text_completion` or `embeddings`), `gen_ai.provider.name` (`openai`,
+`anthropic`, `azure.ai.openai`, `aws.bedrock`, `gcp.gemini`, `gcp.vertex_ai`, `mistral_ai`, `cohere`, ...),
+`gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.token.modality`, `trajectory.request.service_tier`
+(as the provider's response names it), `trajectory.token.source:estimated` (when the provider reported no
+count and Kong's own estimate is used), `trajectory.cost.source:estimated`, `trajectory.observation.point:gateway`
+and `trajectory.profile`. A value that was not observed is left out, never sent as zero. Prompts, responses
+and keys are never read into metrics.
+
+Token counts are read from the provider's response as it passes through Kong: the usage of a buffered
+response, or the usage events of a stream (for OpenAI streams, the client must ask for usage with
+`stream_options.include_usage`). The cost is only sent when the AI Proxy model sets `input_cost` and
+`output_cost`.
+
+Optional tags, with `ai_usage_metrics_tags`:
+
+- `provider_account`, `project`: the account and project the provider billed, from its response headers
+  (`openai-organization`, `openai-project`, `anthropic-organization-id`), sent as
+  `trajectory.request.provider_account_id` and `trajectory.request.project_id`. The values declared with
+  `ai_usage_metrics_provider_account_id` and `ai_usage_metrics_project_id` take precedence, and are sent
+  whether or not these tags are enabled.
+- `route`: the Kong route name, as `trajectory.gateway.route`.
+- `destination`: the Kong service name, as `trajectory.gateway.destination.id`.
+- `user`: the authenticated Kong consumer's `custom_id`, or else its `username`, as `user.id`.
+- `service`: the service name of the plugin's traces (`DD_SERVICE`, `service_name`, or `kong`), as `service`.
+
+`trajectory.request.api_key_id` is only ever the value declared with `ai_usage_metrics_api_key_id`; it is
+never derived from a key.
+
+```yaml
+plugins:
+- name: ddtrace
+  config:
+    agent_host: datadog-agent
+    ai_usage_metrics_enabled: true
+    ai_usage_metrics_tags: [provider_account, project, route]
+```
 
 ## Tag root span with HTTP Headers (DD_TRACE_HEADER_TAGS)
 
