@@ -419,6 +419,10 @@ end
 local batch = dogstatsd.new_batch()
 local writer = { started = false }
 
+-- The largest DogStatsD datagram: the usual Ethernet MTU less IP and UDP
+-- headers, as Datadog's DogStatsD clients use for UDP.
+local MAX_DATAGRAM_BYTES = 1432
+
 local function send_lines(lines, host, port)
     local sock = ngx.socket.udp()
     local ok, err = sock:setpeername(host, port)
@@ -426,21 +430,35 @@ local function send_lines(lines, host, port)
         kong.log.warn("ddtrace: cannot send AI usage metrics to ", host, ":", tostring(port), ": ", err)
         return
     end
-    -- Several lines per datagram, each datagram within the Agent's default
-    -- buffer size.
+    -- Several lines per datagram, each small enough to cross a network
+    -- without IP fragmentation, which can drop it on the way to the Agent.
     local packet, size = {}, 0
+    local dropped, last_err = 0, nil
+    local function send()
+        local sent, send_err = sock:send(concat(packet, "\n"))
+        if not sent then
+            dropped = dropped + #packet
+            last_err = send_err
+        end
+        packet, size = {}, 0
+    end
     for _, line in ipairs(lines) do
-        if size > 0 and size + #line + 1 > 8192 then
-            sock:send(concat(packet, "\n"))
-            packet, size = {}, 0
+        if size > 0 and size + #line + 1 > MAX_DATAGRAM_BYTES then
+            send()
         end
         packet[#packet + 1] = line
         size = size + #line + 1
     end
     if size > 0 then
-        sock:send(concat(packet, "\n"))
+        send()
     end
     sock:close()
+    if dropped > 0 then
+        -- Once per flush at most: the Agent being down or not listening must
+        -- not lose metrics silently.
+        kong.log.warn("ddtrace: sending AI usage metrics to ", host, ":", tostring(port),
+            " failed (", tostring(last_err), "); ", dropped, " lines dropped")
+    end
 end
 
 local function flush()
